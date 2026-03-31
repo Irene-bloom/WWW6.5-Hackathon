@@ -12,7 +12,7 @@ import {
   hutConnectButtonClassName,
   hutConnectTheme,
 } from "@/lib/thirdweb-connect-theme";
-import { thirdwebClient } from "@/lib/thirdweb-client";
+import { client } from "@/lib/thirdweb-client";
 
 type Locale = "zh" | "en";
 
@@ -82,7 +82,7 @@ function ExperienceBody({
           <div className="flex flex-wrap items-center justify-end gap-2">
             <div className="glow-hover flex shrink-0 items-center">
               <ConnectButton
-                client={thirdwebClient}
+                client={client}
                 chain={avalancheFuji}
                 theme={hutConnectTheme}
                 connectButton={{
@@ -145,6 +145,7 @@ function ExperienceWithParams() {
     <NextIntlClientProvider
       locale={locale}
       messages={pageMessages[locale] as unknown as AbstractIntlMessages}
+      timeZone="Asia/Shanghai"
     >
       <ExperienceBody
         locale={locale}

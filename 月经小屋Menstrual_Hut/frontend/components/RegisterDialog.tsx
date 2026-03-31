@@ -119,7 +119,13 @@ export function RegisterDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[min(90vh,640px)] overflow-y-auto sm:max-w-md">
+      <DialogContent 
+        className="max-h-[min(90vh,640px)] overflow-y-auto sm:max-w-md"
+        onPointerDownOutside={(e: Event) => {
+          // 如果处于成功界面，阻止点击弹窗外部导致意外关闭
+          if (step === "success") e.preventDefault();
+        }}
+      >
         {step === "success" ? (
           <>
             <DialogHeader>
@@ -128,8 +134,12 @@ export function RegisterDialog({
                 {t("registerSuccessBody")}
               </DialogDescription>
             </DialogHeader>
-            <DialogFooter className="sm:justify-center">
-              <Button type="button" className="w-full sm:w-auto" onClick={() => onOpenChange(false)}>
+            <DialogFooter className="sm:justify-center gap-2 mt-4">
+              <Button 
+                type="button" 
+                className="w-full sm:w-auto" 
+                onClick={() => onOpenChange(false)}
+              >
                 {t("registerClose")}
               </Button>
             </DialogFooter>
@@ -144,18 +154,18 @@ export function RegisterDialog({
             </DialogHeader>
 
             {walletAddress ? (
-              <p className="rounded-xl border border-pink-100 bg-white/60 px-3 py-2 text-center text-xs text-[#9f1239]/75">
+              <p className="rounded-xl border border-pink-100 bg-white/60 px-3 py-2 text-center text-xs text-[#9f1239]/75 mt-4">
                 {t("registerWalletHint")}
                 {": "}
                 <span className="font-mono text-[#4c1d95]">{walletShort}</span>
               </p>
             ) : (
-              <p className="rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-2 text-center text-sm text-amber-900">
+              <p className="rounded-xl border border-amber-200/80 bg-amber-50/90 px-3 py-2 text-center text-sm text-amber-900 mt-4">
                 {t("registerNoWallet")}
               </p>
             )}
 
-            <div className="grid gap-4 py-2">
+            <div className="grid gap-4 py-4">
               <div className="grid gap-2">
                 <Label htmlFor="hut-phone">{t("registerPhone")}</Label>
                 <div className="flex gap-2">
@@ -216,10 +226,10 @@ export function RegisterDialog({
               </div>
             </div>
 
-            <p className="text-xs leading-relaxed text-[#9f1239]/65">{t("registerPrivacy")}</p>
+            <p className="text-xs leading-relaxed text-[#9f1239]/65 mb-4">{t("registerPrivacy")}</p>
 
             {formError ? (
-              <p className="rounded-lg border border-rose-200 bg-rose-50/90 px-3 py-2 text-sm text-rose-800" role="alert">
+              <p className="rounded-lg border border-rose-200 bg-rose-50/90 px-3 py-2 text-sm text-rose-800 mb-4" role="alert">
                 {formError}
               </p>
             ) : null}

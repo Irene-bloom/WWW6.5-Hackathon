@@ -1,3 +1,18 @@
+/**
+ * ⚠️ SECURITY WARNING: THIS IS A DEMO IMPLEMENTATION ONLY
+ * * This file stores sensitive user data (phone, ID number, password) in localStorage.
+ * This is EXTREMELY INSECURE and should NEVER be used in production.
+ * * For production, you MUST:
+ * 1. Move all identity storage to a secure backend server
+ * 2. Use proper encryption (AES-256, not Base64)
+ * 3. Never store raw passwords - use bcrypt or Argon2
+ * 4. Implement proper session management with secure tokens
+ * 5. Add rate limiting and account lockout mechanisms
+ * 6. Use HTTPS only
+ * 7. Implement CSRF protection
+ * 8. Add audit logging
+ */
+
 const STORAGE_KEY = "menstrual-hut.identity.v1";
 
 export type HutIdentityRecord = {
@@ -50,7 +65,6 @@ export async function sha256Hex(text: string): Promise<string> {
     .join("");
 }
 
-/** 演示用“加密”，生产环境必须由服务端处理 */
 export function mockEncryptPassword(password: string): string {
   const b = typeof btoa !== "undefined" ? btoa(unescape(encodeURIComponent(password))) : "";
   return `mock:enc:v1:${b}`;
@@ -62,6 +76,24 @@ export async function saveHutIdentity(input: {
   plainIdNumber: string;
   password: string;
 }): Promise<void> {
+  if (!input.walletAddress || input.walletAddress.trim().length === 0) {
+    throw new Error("Invalid wallet address");
+  }
+  
+  // 核心修复：剔除非数字字符，并兼容移除前缀 "86"，再进行 11 位手机号校验
+  const cleanPhone = input.phone.replace(/\D/g, "").replace(/^86/, "");
+  if (!input.phone || !/^1\d{10}$/.test(cleanPhone)) {
+    throw new Error("Invalid phone number");
+  }
+  
+  if (!input.plainIdNumber || !/^\d{17}[\dXx]$/.test(input.plainIdNumber.trim())) {
+    throw new Error("Invalid ID number");
+  }
+  
+  if (!input.password || input.password.length < 6) {
+    throw new Error("Invalid password (minimum 6 characters)");
+  }
+
   const walletAddress = input.walletAddress.toLowerCase();
   if (isIdentityRegistered(walletAddress)) {
     throw new Error("Identity already registered for this wallet");

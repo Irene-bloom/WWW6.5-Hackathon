@@ -8,7 +8,9 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { DayPicker } from "react-day-picker";
 import { avalancheFuji } from "thirdweb/chains";
-import { ConnectButton, useActiveAccount } from "thirdweb/react";
+import { client } from "@/lib/thirdweb-client";
+import { getContract, prepareContractCall } from "thirdweb";
+import { useWalletBalance, ConnectButton, useActiveAccount, useReadContract, useSendTransaction } from "thirdweb/react";
 import "react-day-picker/style.css";
 
 import { RegisterDialog } from "@/components/RegisterDialog";
@@ -18,13 +20,83 @@ import {
   hutConnectButtonClassName,
   hutConnectTheme,
 } from "@/lib/thirdweb-connect-theme";
-import { thirdwebClient } from "@/lib/thirdweb-client";
+
+const MOON_TOKEN_ADDRESS = "0x0e99AE008922E4547EE0e35388a0a4FD907C6c01";
+const HUT_CONTRACT_ADDRESS = "0xa7791A383491871a4f29EC0804bBD884957689F2";
+
+// 常量：IPFS 访问网关
+const IPFS_GATEWAY = "https://gateway.pinata.cloud/ipfs/"; // 若遇到网络问题可换成 "https://ipfs.io/ipfs/"
+
+// --- 新增：单条真实帖子组件 ---
+function PostItem({ index, locale }: { index: number; locale: string }) {
+  // 1. 读取合约中 records 数组指定 index 的数据
+  const { data: record, isLoading } = useReadContract({
+    contract: hutContract,
+    method: "function records(uint256) view returns (string cid, address author, uint256 timestamp, bool isHelp, bool isDonation)",
+    params: [BigInt(index)],
+  });
+
+  const [postContent, setPostContent] = useState<string>("");
+  const [isFetchingIpfs, setIsFetchingIpfs] = useState(false);
+
+  useEffect(() => {
+    if (record && record[0]) {
+      const cid = record[0];
+      setIsFetchingIpfs(true);
+      // 2. 根据 CID 从 IPFS 抓取 JSON 内容
+      fetch(`${IPFS_GATEWAY}${cid}`)
+        .then((res) => res.json())
+        .then((data) => {
+          if (data && data.content) {
+            setPostContent(data.content);
+          }
+        })
+        .catch((err) => {
+          console.error("Fetch IPFS error:", err);
+          setPostContent(locale === "zh" ? "内容加载失败..." : "Failed to load content...");
+        })
+        .finally(() => setIsFetchingIpfs(false));
+    }
+  }, [record, locale]);
+
+  if (isLoading) {
+    return <div className="rounded-xl bg-white p-3 text-sm text-[#4c1d95]/50 animate-pulse">正在加载链上数据...</div>;
+  }
+
+  if (!record) return null;
+
+  const authorShort = `${record[1].slice(0, 6)}...${record[1].slice(-4)}`;
+  const dateStr = new Date(Number(record[2]) * 1000).toLocaleString();
+
+  return (
+    <div className="rounded-xl bg-white p-4 text-sm text-[#4c1d95] shadow-sm transition hover:shadow-md">
+      <div className="mb-2 flex items-center justify-between text-xs text-[#9f1239]/60">
+        <span className="font-mono bg-pink-50 px-2 py-0.5 rounded-md">{authorShort}</span>
+        <span>{dateStr}</span>
+      </div>
+      <div className="whitespace-pre-wrap leading-relaxed">
+        {isFetchingIpfs ? (
+          <span className="animate-pulse text-[#9f1239]/60">
+            {locale === "zh" ? "正在从 IPFS 解析感受..." : "Fetching from IPFS..."}
+          </span>
+        ) : (
+          postContent || "（无文字内容）"
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+const hutContract = getContract({
+  client,
+  chain: avalancheFuji,
+  address: HUT_CONTRACT_ADDRESS,
+});
 
 type Locale = "zh" | "en";
 type ShareMode = "free" | "paid" | "private";
 type UploadPhase = "idle" | "prepare" | "ipfs" | "chain" | "mint" | "success";
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const TEXT_FILE_MAX_BYTES = 512 * 1024;
 const TEXT_FILE_ACCEPT = ".txt,.md,.markdown,.csv,.log,.json,text/plain,text/markdown,application/json";
@@ -124,6 +196,12 @@ const messages = {
     registerPwdMismatch: "两次输入的密码不一致，请再确认一次。",
     registerAlready: "该钱包已绑定过身份。",
     registerSaveError: "保存失败，请稍后重试。",
+    endPeriod: "结束经期",
+    endingPeriod: "正在结束...",
+    periodDetail: "经期详细",
+    postBrowsing: "帖子浏览",
+    mockPost1: "🌙 今天第一天，肚子有点酸，给自己泡了杯热红糖水，姐妹们也要照顾好自己呀。",
+    mockPost2: "✨ 终于鼓起勇气去了医院做常规检查，女医生非常温柔，大家有不舒服千万别硬扛！",
   },
   en: {
     brand: "Menstrual Hut | 月经小屋",
@@ -211,6 +289,12 @@ const messages = {
     registerPwdMismatch: "The two passwords don’t match. Please try again.",
     registerAlready: "This wallet is already registered.",
     registerSaveError: "Could not save. Please try again.",
+    endPeriod: "End Period",
+    endingPeriod: "Ending...",
+    periodDetail: "Period Detail",
+    postBrowsing: "Community Posts",
+    mockPost1: "🌙 First day today. A bit of cramps, but ginger tea helps. Take care of yourselves, sisters.",
+    mockPost2: "✨ Finally went for my checkup. The female doctor was so gentle. Don't ignore your body's signals!",
   },
 } as const;
 
@@ -225,6 +309,18 @@ function HomeContent({
   const router = useRouter();
   const account = useActiveAccount();
   const walletConnected = !!account?.address;
+  // 新增状态：判断当前是否处于经期、控制经期详细弹窗
+const [isPeriodActive, setIsPeriodActive] = useState(false);
+const [periodDetailOpen, setPeriodDetailOpen] = useState(false);
+
+  const { data: moonBalance } = useWalletBalance({
+    client,
+    chain: avalancheFuji,
+    address: account?.address,       // 当前登录的钱包地址
+    tokenAddress: MOON_TOKEN_ADDRESS // MOON币的合约地址
+  });
+
+  const { mutateAsync: sendTransaction } = useSendTransaction();
 
   const [entry, setEntry] = useState("");
   const [shareMode, setShareMode] = useState<ShareMode>("paid");
@@ -263,25 +359,110 @@ function HomeContent({
   }, [t, uploadPhase]);
 
   const handleHutUpload = async () => {
-    const text = entry.trim();
-    if (!text) return;
+    if (!entry.trim()) return;
+
+    // 验证钱包连接
     if (!walletConnected) {
       setUploadError(t("connectFirst"));
       return;
     }
-    if (entryLen > 1000) return;
 
-    setUploadError("");
     setUploadPhase("prepare");
-    await sleep(900);
-    setUploadPhase("ipfs");
-    await sleep(1200);
-    setUploadPhase("chain");
-    await sleep(1200);
-    setUploadPhase("mint");
-    await sleep(1200);
-    setUploadPhase("success");
-    setEntry("");
+    setUploadError("");
+
+    try {
+      // 步骤 1：上传文本到 IPFS
+      console.log("开始上传到 IPFS...");
+      console.log("API 端点: /api/upload");
+      const ipfsRes = await fetch("/api/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+           content: entry,
+           timestamp: new Date().toISOString(),
+           isPublic: shareMode !== "private" 
+        }),
+      });
+
+      console.log(`IPFS 响应状态: ${ipfsRes.status}`);
+      console.log(`响应 URL: ${ipfsRes.url}`);
+      console.log(`响应类型: ${ipfsRes.type}`);
+
+      if (!ipfsRes.ok) {
+        // Response body 只能读取一次，所以先读取为 text，然后尝试 parse
+        const responseText = await ipfsRes.text();
+        console.error("API 错误响应:", responseText);
+        
+        let errorMsg = `API 返回 ${ipfsRes.status}`;
+        try {
+          const errData = JSON.parse(responseText);
+          errorMsg += `: ${errData.error || responseText}`;
+        } catch {
+          errorMsg += `: ${responseText}`;
+        }
+        throw new Error(errorMsg);
+      }
+
+      const resData = await ipfsRes.json();
+      const cid = resData.cid;
+      if (!cid) throw new Error("IPFS 上传失败：没有返回 CID");
+
+      console.log(`成功获得 CID: ${cid}`);
+      setUploadPhase("chain");
+
+      // 步骤 2：构造智能合约调用
+      const transaction = prepareContractCall({
+        contract: hutContract,
+        method: "function uploadRecord(string memory _cid, bool _isHelp, bool _isDonation) public",
+        params: [cid, false, false],
+      });
+
+      // 步骤 3：唤起钱包签名并发送上链
+      console.log("准备发送交易到区块链...");
+      await sendTransaction(transaction);
+      
+      console.log("交易成功!");
+      setUploadPhase("success");
+      setEntry(""); // 清空输入框
+      
+      // 3 秒后重置为 idle
+      setTimeout(() => {
+        setUploadPhase("idle");
+      }, 3000);
+
+    } catch (error) {
+      console.error("上传失败:", error);
+      setUploadPhase("idle");
+      
+      let errorMsg = "上传失败";
+      if (error instanceof Error) {
+        if (
+          error.message.includes("User denied") || 
+          error.message.includes("user rejected") || 
+          error.message.includes("4001")
+        ) {
+          errorMsg = locale === "zh" ? "您已取消交易签名" : "Transaction rejected by user";
+        }else if (error.message.includes("404")) {
+          errorMsg = locale === "zh" 
+            ? "API 端点不存在，请确保服务器已启动" 
+            : "API endpoint not found. Please ensure the server is running.";
+        } else if (error.message.includes("IPFS")) {
+          errorMsg = error.message;
+        } else if (error.message.includes("execution reverted") || error.message.includes("Execution Reverted")) {
+          errorMsg = locale === "zh" 
+            ? "合约执行失败，请检查钱包权限或代币配置" 
+            : "Contract execution failed";
+        } else {
+          errorMsg = error.message;
+        }
+      } else {
+        errorMsg = locale === "zh" 
+          ? "上传失败，请确保钱包已连接且有足够的测试网 AVAX" 
+          : "Upload failed. Please check your wallet connection and balance.";
+      }
+      
+      setUploadError(errorMsg);
+    }
   };
 
   const handleTextFileChange = (e: ChangeEvent<HTMLInputElement>) => {
@@ -310,6 +491,89 @@ function HomeContent({
     };
     reader.onerror = () => setFilePickError(t("textFileReadError"));
     reader.readAsText(file, "UTF-8");
+  };
+
+  // --- 新增经期打卡上链函数 ---
+  const handleRecordPeriod = async () => {
+    if (!periodStart) {
+      return;
+    }
+
+    if (!walletConnected) {
+      setPeriodDialogOpen(false);
+      setUploadError(t("connectFirst"));
+      return;
+    }
+
+    try {
+      console.log("准备发送经期打卡交易...");
+      console.log("钱包地址:", account?.address);
+      console.log("合约地址:", HUT_CONTRACT_ADDRESS);
+      
+      // 1. 验证流量级别（1-3）
+      const flowLevel = 1; // 默认正常流量
+      if (flowLevel < 1 || flowLevel > 3) {
+        throw new Error("Invalid flow level, must be 1-3");
+      }
+
+      // 2. 准备合约调用：对应 MenstrualHut.sol 中的 startPeriod 函数
+      const transaction = prepareContractCall({
+        contract: hutContract,
+        method: "function startPeriod(uint8 _flowLevel, string memory _symptomCid) public",
+        params: [flowLevel, ""],
+      });
+
+      console.log("交易已准备，等待用户签名...");
+      
+      // 3. 发送交易并等待钱包签名确认
+      const txResult = await sendTransaction(transaction);
+      
+      console.log("交易已提交，结果:", txResult);
+
+      // 4. 成功后的反馈
+      setPeriodDialogOpen(false);
+      setUploadError(""); // 清除之前的错误
+      
+      // 3 秒后重置
+      setTimeout(() => {
+        setUploadError("");
+      }, 3000);
+      
+    } catch (error) {
+      console.error("经期打卡失败:", error);
+      let errorMsg = "";
+      
+      if (error instanceof Error) {
+        // 处理常见的智能合约错误
+        if (error.message.includes("execution reverted") || error.message.includes("Execution Reverted")) {
+          errorMsg = locale === "zh" 
+            ? `合约执行失败。可能原因：\n1. MOON 代币配置错误\n2. 合约权限不足\n3. 冷却时间还未到达\n错误信息: ${error.message.substring(0, 100)}` 
+            : `Contract execution failed. Possible causes:\n1. MOON token configuration error\n2. Insufficient contract permissions\n3. Cooldown period not reached\nError: ${error.message.substring(0, 100)}`;
+        } else if (error.message.includes("user rejected") || error.message.includes("User denied") || error.message.includes("reject")) {
+          errorMsg = locale === "zh" 
+            ? "您已拒绝交易" 
+            : "Transaction was rejected by user";
+        } else if (error.message.includes("insufficient funds") || error.message.includes("insufficient balance")) {
+          errorMsg = locale === "zh" 
+            ? "钱包余额不足，请确保有足够的 AVAX" 
+            : "Insufficient wallet balance. Please ensure you have enough AVAX";
+        } else if (error.message.includes("network") || error.message.includes("connection")) {
+          errorMsg = locale === "zh" 
+            ? "网络连接错误，请检查网络并重试" 
+            : "Network connection error. Please check your network and try again";
+        } else {
+          errorMsg = locale === "zh" 
+            ? `发生错误: ${error.message}` 
+            : `An error occurred: ${error.message}`;
+        }
+      } else {
+        errorMsg = locale === "zh" 
+          ? "发生未知错误，请查看控制台日志" 
+          : "Unknown error occurred. Please check console logs";
+      }
+      
+      setUploadError(errorMsg);
+    }
   };
 
   const daysUntilNext = useMemo(() => {
@@ -349,19 +613,76 @@ function HomeContent({
     router.push(`/experience?${qs.toString()}`);
   };
 
-  // Mock contract read: if wallet connected, try to fetch last period start + average cycle.
-  // Replace this block with real thirdweb contract calls later.
+  const { data: myPeriods, isLoading: isLoadingPeriods } = useReadContract({
+    contract: hutContract,
+    method: "function getMyPeriods() view returns ((uint256 startTime, uint256 endTime, uint8 flowLevel, string symptomCid)[])",
+    params: [],
+    queryOptions: { enabled: !!account?.address } 
+  });
+
+  // 获取全站总记录数
+  const { data: totalRecords } = useReadContract({
+    contract: hutContract,
+    method: "function getTotalRecords() view returns (uint256)",
+    params: [],
+  });
+
+  // 计算最新 N 条记录的索引（这里展示最新 5 条）
+  const latestPostIndices = useMemo(() => {
+    if (!totalRecords) return [];
+    const total = Number(totalRecords);
+    const indices = [];
+    // 倒序排列，最新的排在最前面
+    const start = Math.max(0, total - 5);
+    for (let i = total - 1; i >= start; i--) {
+      indices.push(i);
+    }
+    return indices;
+  }, [totalRecords]);
+
+  const handleEndPeriod = async () => {
+    if (!walletConnected) {
+      setUploadError(t("connectFirst"));
+      return;
+    }
+    try {
+      const transaction = prepareContractCall({
+        contract: hutContract,
+        method: "function endPeriod() public",
+        params: [],
+      });
+      
+      await sendTransaction(transaction);
+      
+      // 乐观更新前端状态
+      setIsPeriodActive(false);
+      setUploadError(""); 
+    } catch (error) {
+      console.error("结束经期失败:", error);
+      setUploadError(locale === "zh" ? "结束经期失败，请重试" : "Failed to end period");
+    }
+  };
+
   useEffect(() => {
-    if (!walletConnected) return;
+    // 只有当钱包连接了，且合约成功返回了数据数组时才执行
+    if (!walletConnected || !myPeriods || myPeriods.length === 0) {
+        // 如果没数据，保持默认值
+        return;
+    }
 
-    const mock = {
-      latestPeriodStart: null as Date | null,
-      avgCycleDays: 28,
-    };
-
-    setCycleDays(mock.avgCycleDays);
-    setPeriodStart(mock.latestPeriodStart ?? undefined);
-  }, [walletConnected]);
+    // 获取数组中的最后一条经期记录（最近一次打卡）
+    const lastRecord = myPeriods[myPeriods.length - 1];
+    
+    // 合约存的是 Unix 时间戳（秒），BigInt 类型
+    // 我们需要转成毫秒并转换成 JS 的 Date 对象，供前端日历和计算使用
+    if (lastRecord.startTime > BigInt(0)) {
+      const startDate = new Date(Number(lastRecord.startTime) * 1000);
+      setPeriodStart(startDate);
+      console.log("成功同步链上经期数据，开始日期:", startDate);
+      setIsPeriodActive(lastRecord.endTime === BigInt(0));
+    }
+    // 如果你的合约里未来存储了用户的平均周期，也可以在这里 setCycleDays
+  }, [walletConnected, myPeriods]);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-[#f3e8ff] to-[#ffe4f0] text-[#4c1d95]">
@@ -379,7 +700,7 @@ function HomeContent({
           <div className="flex flex-wrap items-center justify-end gap-2">
             <div className="glow-hover flex shrink-0 items-center">
               <ConnectButton
-                client={thirdwebClient}
+                client={client}
                 chain={avalancheFuji}
                 theme={hutConnectTheme}
                 connectButton={{
@@ -580,15 +901,8 @@ function HomeContent({
         <section className="panel col-span-1 space-y-4 lg:col-span-6">
           <h2 className="text-center text-2xl font-semibold text-[#9f1239]">{t("guardian")}</h2>
           <div className="grid gap-4 xl:grid-cols-2">
-            <div
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") setPeriodDialogOpen(true);
-              }}
-              onClick={() => setPeriodDialogOpen(true)}
-              className="glow-hover cursor-pointer rounded-2xl border border-pink-200/80 bg-white/75 p-3"
-            >
+            {/* 左侧：经期信息与按钮 */}
+            <div className="glow-hover rounded-2xl border border-pink-200/80 bg-white/75 p-4 flex flex-col justify-between">
               <div className="space-y-2">
                 <p className={`text-sm ${periodStart ? "text-[#9f1239]" : "text-[#9f1239]/90"}`}>
                   {periodStart
@@ -599,24 +913,50 @@ function HomeContent({
                   {periodStart
                     ? `${locale === "zh" ? "最近经期开始：" : "Latest start: "}${periodStart.toLocaleDateString()}`
                     : locale === "zh"
-                      ? "点击选择日期"
-                      : "Click to pick a date"}
+                      ? "未记录最近经期"
+                      : "No latest period recorded"}
                 </p>
-                <div className="pt-1">
-                  <label className="mb-1 block text-xs text-[#9f1239]/80">{t("averageCycleInput")}</label>
+                <div className="pt-2">
                   <input
                     type="number"
                     min={18}
                     max={60}
                     value={cycleDays}
-                    onClick={(e) => e.stopPropagation()}
+                    placeholder={t("averageCycleInput")}
                     onChange={(e) => {
                       const n = Number(e.target.value);
                       if (!Number.isNaN(n) && n >= 18 && n <= 60) setCycleDays(n);
                     }}
-                    className="w-full rounded-lg border border-pink-200 bg-white px-3 py-2 text-sm text-[#4c1d95] outline-none ring-[#d946ef]/40 focus:ring-2"
+                    className="w-full rounded-lg border border-pink-200 bg-white px-3 py-2 text-sm text-[#4c1d95] outline-none ring-[#d946ef]/40 focus:ring-2 mb-3"
                   />
                 </div>
+              </div>
+
+              {/* 新增操作按钮组 */}
+              <div className="flex flex-col gap-2 mt-auto">
+                {isPeriodActive ? (
+                  <button
+                    onClick={handleEndPeriod}
+                    className="w-full rounded-lg bg-pink-100 px-3 py-2 text-sm font-medium text-pink-700 transition hover:bg-pink-200"
+                  >
+                    {t("endPeriod")}
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setPeriodDialogOpen(true)}
+                    className="w-full rounded-lg bg-[#9f1239]/10 px-3 py-2 text-sm font-medium text-[#9f1239] transition hover:bg-[#9f1239]/20"
+                  >
+                    {locale === "zh" ? "记录新经期" : "Log New Period"}
+                  </button>
+                )}
+                
+                {/* 示意图中的绿色边框“经期详细”按钮 */}
+                <button
+                  onClick={() => setPeriodDetailOpen(true)}
+                  className="w-full rounded-lg border border-rose-300 bg-rose-50/80 px-3 py-2 text-sm font-medium text-rose-700 transition hover:bg-rose-100"
+                >
+                  {t("periodDetail")}
+                </button>
               </div>
             </div>
             <div className="flex flex-col items-center justify-center gap-4 rounded-2xl border border-pink-200/80 bg-white/70 p-4">
@@ -630,6 +970,7 @@ function HomeContent({
               </p>
             </div>
           </div>
+
           <div className="marquee-wrap rounded-full border border-pink-200/80 bg-white/80 py-2">
             <div className="marquee-track text-sm text-[#9f1239]">
               {[...Array(2)].map((_, row) => (
@@ -639,14 +980,53 @@ function HomeContent({
               ))}
             </div>
           </div>
+          <div className="flex-1 mt-2 rounded-2xl border border-purple-300 bg-purple-50/60 p-4 min-h-[200px]">
+            <h3 className="text-center text-sm font-semibold text-purple-900 mb-4">{t("postBrowsing")}</h3>
+            
+            <div className="space-y-3 max-h-[400px] overflow-y-auto pr-1">
+              {latestPostIndices.length > 0 ? (
+                latestPostIndices.map((index) => (
+                  <PostItem key={index} index={index} locale={locale} />
+                ))
+              ) : (
+                <div className="rounded-xl bg-white p-4 text-center text-sm text-[#4c1d95]/70 shadow-sm">
+                  {locale === "zh" ? "小屋目前还没有公开记录，来分享第一篇吧 🌙" : "No posts yet. Be the first to share 🌙"}
+                </div>
+              )}
+            </div>
+          </div>
         </section>
 
         {periodDialogOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <div className="absolute inset-0 bg-black/35" />
-            <div className="relative w-full max-w-md overflow-hidden rounded-2xl border border-pink-200/80 bg-white/92 p-4 shadow-xl backdrop-blur-md">
+          <div 
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            onClick={() => setPeriodDialogOpen(false)}
+          >
+            <div 
+              className="absolute inset-0 bg-black/35 pointer-events-none" 
+              aria-hidden="true"
+            />
+            <div 
+              className="relative w-full max-w-md overflow-hidden rounded-2xl border border-pink-200/80 bg-white/92 p-4 shadow-xl backdrop-blur-md"
+              onClick={(e) => e.stopPropagation()}
+            >
               <div className="flex items-center justify-between gap-3">
                 <h3 className="text-base font-semibold text-[#9f1239]">{t("noData")}</h3>
+                <button
+                  type="button"
+                  onClick={() => setPeriodDialogOpen(false)}
+                  className="ml-auto inline-flex h-7 w-7 items-center justify-center rounded-full bg-pink-100/60 hover:bg-pink-200/80 text-[#9f1239] transition"
+                  aria-label="Close dialog"
+                >
+                  <svg
+                    className="h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
               </div>
               <div className="mt-3 rounded-xl bg-white p-2">
                 <DayPicker
@@ -657,15 +1037,52 @@ function HomeContent({
                   }}
                 />
               </div>
-              <div className="mt-4">
+              <div className="mt-4 flex gap-2">
                 <button
                   type="button"
                   onClick={() => setPeriodDialogOpen(false)}
-                  className="glow-hover w-full rounded-xl bg-gradient-to-r from-[#f472b6] to-[#d946ef] px-4 py-3 text-sm font-semibold text-white shadow-sm"
+                  className="flex-1 rounded-xl border border-pink-200 bg-white px-4 py-3 text-sm font-semibold text-[#9f1239] hover:bg-pink-50/50 transition"
+                >
+                  {locale === "zh" ? "取消" : "Cancel"}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRecordPeriod}
+                  className="flex-1 glow-hover rounded-xl bg-gradient-to-r from-[#f472b6] to-[#d946ef] px-4 py-3 text-sm font-semibold text-white shadow-sm"
                 >
                   {t("confirm")}
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {periodDetailOpen && (
+          <div 
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            onClick={() => setPeriodDetailOpen(false)}
+          >
+            <div className="absolute inset-0 bg-black/35 pointer-events-none" aria-hidden="true" />
+            <div 
+              className="relative w-full max-w-md overflow-hidden rounded-2xl border border-pink-200/80 bg-white/92 p-6 shadow-xl backdrop-blur-md"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-lg font-semibold text-[#9f1239] mb-4">{t("periodDetail")}</h3>
+              <p className="text-sm text-[#9f1239]/80 mb-4">
+                {locale === "zh" ? "在这里可以记录你的流量、痛感和详细感受（后续可接入合约的 _flowLevel 和 _symptomCid）。" : "Log your flow level, pain, and feelings here."}
+              </p>
+              
+              <textarea
+                placeholder={locale === "zh" ? "例如：今天量很多，伴有轻微偏头痛..." : "e.g., Heavy flow today, mild headache..."}
+                className="min-h-32 w-full rounded-xl border border-pink-200 bg-white p-3 text-sm text-[#4c1d95] outline-none focus:ring-2 focus:ring-[#d946ef]/40"
+              />
+              
+              <button
+                onClick={() => setPeriodDetailOpen(false)}
+                className="mt-4 w-full glow-hover rounded-xl bg-gradient-to-r from-[#f472b6] to-[#d946ef] px-4 py-3 text-sm font-semibold text-white shadow-sm"
+              >
+                {locale === "zh" ? "保存记录" : "Save Record"}
+              </button>
             </div>
           </div>
         )}
@@ -723,7 +1140,7 @@ function HomeContent({
           <span className="inline-block h-2.5 w-2.5 rounded-full bg-[#ec4899]" />
           MOON:
           {" "}
-          {walletConnected ? "88.8" : "--"}
+          {walletConnected ? (moonBalance?.displayValue || "0") : "--"}
         </p>
         <p>{t("footer")}</p>
       </footer>
@@ -738,6 +1155,7 @@ export default function Home() {
     <NextIntlClientProvider
       locale={locale}
       messages={messages[locale] as unknown as AbstractIntlMessages}
+      timeZone="Asia/Shanghai"
     >
       <HomeContent
         locale={locale}
@@ -746,3 +1164,5 @@ export default function Home() {
     </NextIntlClientProvider>
   );
 }
+
+
